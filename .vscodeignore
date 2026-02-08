@@ -12,3 +12,27 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+
+# source
+src/**
+**/*.ts
+**/*.map
+
+# dev
+.vscode/**
+.eslint*
+tsconfig*
+vite.config*
+README.md
+
+# tests
+test/**
+
+# webview dev
+webview-ui/src/**
+webview-ui/node_modules/**
+webview-ui/public/**
+
+# misc
+.gitignore
+pnpm-lock.yaml
