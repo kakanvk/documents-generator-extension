@@ -2,11 +2,44 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import { AuthManager } from "./auth";
 import { SheetManager } from "./sheet";
+import { validateGeminiApiKey, generateSheetJson } from "./gemini";
+import { GeminiResponse } from "./gemini/res.type";
 
 // Danh sách các webview đang hoạt động để đồng bộ cấu hình
 const activeWebviews = new Set<vscode.Webview>();
 const outputChannel = vscode.window.createOutputChannel("Doc Generator");
 let authManager: AuthManager;
+
+/**
+ * Helper function: Thực thi một function với token, tự động retry nếu gặp 401
+ */
+async function executeWithTokenRefresh<T>(
+  fn: (token: string) => Promise<T>,
+  context: vscode.ExtensionContext,
+): Promise<T> {
+  const fullConfig = await getFullConfig(context);
+  const accessToken = fullConfig.accessToken;
+
+  if (!accessToken) {
+    throw new Error("Chưa đăng nhập");
+  }
+
+  try {
+    return await fn(accessToken);
+  } catch (err: any) {
+    // Nếu gặp lỗi 401, thử refresh token và retry
+    if (err.message?.includes("401") || err.message?.includes("Unauthorized")) {
+      outputChannel.appendLine("[System] Gặp lỗi 401, đang refresh token...");
+      const refreshedToken = await authManager.refreshToken();
+
+      if (refreshedToken) {
+        await broadcastConfig(context);
+        return await fn(refreshedToken);
+      }
+    }
+    throw err;
+  }
+}
 
 export function activate(context: vscode.ExtensionContext) {
   outputChannel.appendLine("Doc Generator extension is now active");
@@ -63,57 +96,36 @@ export function activate(context: vscode.ExtensionContext) {
         switch (data.command) {
           case "generateSheet":
             outputChannel.show(true);
-            if (!accessToken) {
-              vscode.window.showErrorMessage("Bạn chưa đăng nhập Google.");
-              panel.webview.postMessage({
-                command: "generateResult",
-                success: false,
-              });
-              return;
-            }
-
-            const runGenerate = async (token: string) => {
-              outputChannel.appendLine(
-                `[Sheet] --- Bắt đầu quá trình Generate ---`,
-              );
-              const sheetManager = new SheetManager(outputChannel);
-              await sheetManager.ensureSheetExists(data.sheetId, token);
-              const records = data.files.map((f: any, idx: number) => ({
-                no: idx + 1,
-                fileName: f.fileName,
-                time: new Date().toLocaleString("vi-VN"),
-              }));
-              await sheetManager.addRecordsToSheet(
-                data.sheetId,
-                token,
-                records,
-              );
-              vscode.window.showInformationMessage(
-                "Đã thêm dữ liệu thành công!",
-              );
-              panel.webview.postMessage({
-                command: "generateResult",
-                success: true,
-              });
-            };
 
             try {
-              await runGenerate(accessToken);
+              await executeWithTokenRefresh(async (token) => {
+                outputChannel.appendLine(
+                  `[Sheet] --- Bắt đầu quá trình Generate ---`,
+                );
+                const sheetManager = new SheetManager(outputChannel);
+                await sheetManager.ensureSheetExists(data.sheetId, token);
+
+                const records = data.files.map((f: any, idx: number) => ({
+                  no: idx + 1,
+                  fileName: f.fileName,
+                  time: new Date().toLocaleString("vi-VN"),
+                }));
+
+                await sheetManager.addRecordsToSheet(
+                  data.sheetId,
+                  token,
+                  records,
+                );
+
+                vscode.window.showInformationMessage(
+                  "Đã thêm dữ liệu thành công!",
+                );
+                panel.webview.postMessage({
+                  command: "generateResult",
+                  success: true,
+                });
+              }, context);
             } catch (err: any) {
-              if (
-                err.message?.includes("401") ||
-                err.message?.includes("Unauthorized")
-              ) {
-                const refreshedToken = await authManager.refreshToken();
-                if (refreshedToken) {
-                  try {
-                    await runGenerate(refreshedToken);
-                    return;
-                  } catch (secondErr: any) {
-                    err = secondErr;
-                  }
-                }
-              }
               vscode.window.showErrorMessage(`Lỗi: ${err.message}`);
               panel.webview.postMessage({
                 command: "generateResult",
@@ -122,51 +134,160 @@ export function activate(context: vscode.ExtensionContext) {
             }
             break;
 
+          case "generateSheetJson":
+            outputChannel.show(true);
+            try {
+              await executeWithTokenRefresh(async (token) => {
+                outputChannel.appendLine(
+                  `[Gemini] --- Bắt đầu quá trình Generate JSON ---`,
+                );
+
+                // Lấy API Key từ config
+                const config = await getFullConfig(context);
+                if (!config.geminiApiKey) {
+                  throw new Error("Vui lòng cấu hình Gemini API Key trước.");
+                }
+
+                // Filter tasks based on selected or all
+                let tasksToProcess = [];
+                if (data.selectedTaskId) {
+                  const t = data.allTasks.find(
+                    (x: any) => x.id === data.selectedTaskId,
+                  );
+                  if (t) tasksToProcess.push(t);
+                } else {
+                  tasksToProcess = data.allTasks || [];
+                }
+
+                // Add the specific hardcoded task 2 if not present, or handle in prompt logic?
+                // The prompt handles Task 2 specifically.
+                // We should ensure Task 2 is in the list passed to prompt if we want it generated.
+                // However, user said "Riêng task 2... để nguyên".
+                // If user doesn't select Task 2 but selects Task 1, generate Task 1.
+                // If user selects Task 2, generate Task 2 (fixed).
+                // If user selects nothing/all, generate all.
+
+                const { data: resultData, prompt: usedPrompt } =
+                  await generateSheetJson(
+                    config.geminiApiKey,
+                    tasksToProcess,
+                    data.files,
+                    data.images,
+                    config.geminiModel,
+                  );
+
+                outputChannel.appendLine("[Gemini Prompt (Pre-Files)]:");
+                outputChannel.appendLine(usedPrompt);
+                outputChannel.appendLine("[Gemini Output]:");
+                outputChannel.appendLine(JSON.stringify(resultData, null, 2));
+
+                // Tự động tạo sheet chi tiết sau khi có kết quả từ Gemini
+                if (tasksToProcess.length > 0) {
+                  const sheetManager = new SheetManager(outputChannel);
+                  const mainTask = tasksToProcess[0];
+                  await sheetManager.createDetailedSheet(
+                    data.sheetId,
+                    token,
+                    mainTask,
+                    resultData,
+                  );
+                  vscode.window.showInformationMessage(
+                    `Đã tạo sheet chi tiết cho task ${mainTask.id}`,
+                  );
+                }
+
+                panel.webview.postMessage({
+                  command: "generateResult",
+                  success: true,
+                  data: resultData,
+                });
+
+                vscode.window.showInformationMessage(
+                  "Đã tạo JSON thành công! Kiểm tra Output.",
+                );
+              }, context);
+            } catch (err: any) {
+              vscode.window.showErrorMessage(`Lỗi Gemini: ${err.message}`);
+              outputChannel.appendLine(`[Error] ${err.message}`);
+              panel.webview.postMessage({
+                command: "generateResult",
+                success: false,
+                error: err.message,
+              });
+            }
+            break;
+
           case "checkSheetAccess":
             outputChannel.appendLine(
               `[Sheet] Đang kiểm tra quyền: ${data.sheetId}`,
             );
-            if (!accessToken) {
-              panel.webview.postMessage({
-                command: "checkSheetAccessResult",
-                success: false,
-                error: "Chưa đăng nhập",
-              });
-              return;
-            }
 
-            const runCheck = async (token: string) => {
-              const sm = new SheetManager(outputChannel);
-              const result = await sm.checkAccess(data.sheetId, token);
-              // Nếu checkAccess trả về success=false nhưng status=401, ta throw để catch và refresh
-              if (!result.success && result.error?.includes("401")) {
-                throw new Error("401-Unauthorized");
-              }
+            try {
+              const result = await executeWithTokenRefresh(async (token) => {
+                const sm = new SheetManager(outputChannel);
+                return await sm.checkAccess(data.sheetId, token);
+              }, context);
+
               panel.webview.postMessage({
                 command: "checkSheetAccessResult",
                 ...result,
               });
-            };
-
-            try {
-              await runCheck(accessToken);
             } catch (err: any) {
-              if (err.message?.includes("401")) {
-                const refreshedToken = await authManager.refreshToken();
-                if (refreshedToken) {
-                  try {
-                    await runCheck(refreshedToken);
-                    return;
-                  } catch (e) {}
-                }
-              }
               panel.webview.postMessage({
                 command: "checkSheetAccessResult",
                 success: false,
-                error: "Lỗi kết nối",
+                error:
+                  err.message === "Chưa đăng nhập"
+                    ? err.message
+                    : "Lỗi kết nối",
               });
             }
             break;
+
+          case "getSheetData":
+            outputChannel.appendLine(
+              `[Sheet] Đang lấy dữ liệu task từ sheet: ${data.sheetId}`,
+            );
+            try {
+              const tasks = await executeWithTokenRefresh(async (token) => {
+                const sm = new SheetManager(outputChannel);
+                return await sm.getSheetData(
+                  data.sheetId,
+                  token,
+                  data.sheetName,
+                );
+              }, context);
+
+              panel.webview.postMessage({
+                command: "getSheetDataResult",
+                success: true,
+                tasks,
+              });
+            } catch (err: any) {
+              panel.webview.postMessage({
+                command: "getSheetDataResult",
+                success: false,
+                error: err.message,
+              });
+            }
+            break;
+
+          case "logTaskInfo":
+            const task = data.task;
+            if (task) {
+              outputChannel.appendLine(`[Selected Task] ID: ${task.id}`);
+              outputChannel.appendLine(`[Selected Task] EPIC: ${task.epic}`);
+              outputChannel.appendLine(`[Selected Task] Details:`);
+              if (task.userStories && Array.isArray(task.userStories)) {
+                task.userStories.forEach((s: any) => {
+                  outputChannel.appendLine(
+                    `  - ${s.content} [${s.startDate} - ${s.endDate}]`,
+                  );
+                });
+              }
+            }
+            break;
+
           case "getConfig":
             // ... (existing cases)
             await broadcastConfig(context, panel.webview);
@@ -287,6 +408,47 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.commands.executeCommand("doc-gen.openTool", "sheet");
     }),
   );
+
+  // 3. Setup Token Refresh Mechanism
+  // 3.1 Refresh on startup
+  setTimeout(async () => {
+    outputChannel.appendLine("[System] Checking token status on startup...");
+    await authManager.refreshToken();
+  }, 5000); // Delay 5s to ensure everything is loaded
+
+  // 3.2 Refresh interval (30 minutes)
+  const refreshInterval = setInterval(
+    async () => {
+      outputChannel.appendLine(
+        "[System] Auto-refreshing token (30m interval)...",
+      );
+      await authManager.refreshToken();
+    },
+    30 * 60 * 1000,
+  );
+
+  // Clear interval on deactivate
+  context.subscriptions.push({
+    dispose: () => clearInterval(refreshInterval),
+  });
+
+  // 3.3 Command to manually test refresh token
+  context.subscriptions.push(
+    vscode.commands.registerCommand("doc-gen.testRefreshToken", async () => {
+      outputChannel.show(true);
+      outputChannel.appendLine("[Manual] Triggering token refresh test...");
+      const newToken = await authManager.refreshToken();
+      if (newToken) {
+        vscode.window.showInformationMessage(
+          "Access Token đã được làm mới thành công!",
+        );
+      } else {
+        vscode.window.showErrorMessage(
+          "Không thể làm mới token. Kiểm tra Output để xem chi tiết.",
+        );
+      }
+    }),
+  );
 }
 
 class DocGenWebviewViewProvider implements vscode.WebviewViewProvider {
@@ -353,6 +515,16 @@ class DocGenWebviewViewProvider implements vscode.WebviewViewProvider {
         case "logout":
           await this._authManager.logout();
           await broadcastConfig(this._context);
+          break;
+        case "refreshToken":
+          await this._authManager.refreshToken();
+          break;
+        case "validateApiKey":
+          const isValid = await validateGeminiApiKey(data.apiKey);
+          webviewView.webview.postMessage({
+            command: "validateApiKeyResult",
+            isValid,
+          });
           break;
       }
     });

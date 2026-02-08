@@ -22,6 +22,9 @@ export default function SheetGenerator() {
   const [isDragging, setIsDragging] = useState(false);
   const [droppedFiles, setDroppedFiles] = useState<string[]>([]);
   const [fileContents, setFileContents] = useState<FileData[]>([]);
+  const [images, setImages] = useState<
+    { id: string; base64: string; mimeType: string }[]
+  >([]);
   const [isLoading, setIsLoading] = useState(false);
   const [sheetId, setSheetId] = useState("");
 
@@ -35,6 +38,9 @@ export default function SheetGenerator() {
   >("idle");
   const [accessError, setAccessError] = useState("");
   const [sheetTitle, setSheetTitle] = useState("");
+  // States for Tasks
+  const [tasks, setTasks] = useState<any[]>([]);
+  const [selectedTaskId, setSelectedTaskId] = useState<string>("");
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -60,6 +66,20 @@ export default function SheetGenerator() {
         } else {
           setAccessStatus("error");
           setAccessError(message.error);
+          setTasks([]);
+        }
+      }
+      if (message.command === "getSheetDataResult") {
+        if (message.success) {
+          setTasks(message.tasks);
+          if (message.tasks && message.tasks.length > 0) {
+            // Mặc định chọn task đầu tiên
+            const firstTask = message.tasks[0];
+            setSelectedTaskId(firstTask.id);
+            vscode.postMessage({ command: "logTaskInfo", task: firstTask });
+          }
+        } else {
+          // Handle error if needed
         }
       }
     };
@@ -71,6 +91,7 @@ export default function SheetGenerator() {
   useEffect(() => {
     if (!sheetId || sheetId.length < 10) {
       setAccessStatus("idle");
+      setTasks([]);
       return;
     }
 
@@ -81,6 +102,13 @@ export default function SheetGenerator() {
 
     return () => clearTimeout(timer);
   }, [sheetId]);
+
+  // Fetch tasks when access is granted
+  useEffect(() => {
+    if (accessStatus === "success" && sheetId) {
+      vscode.postMessage({ command: "getSheetData", sheetId });
+    }
+  }, [accessStatus, sheetId]);
 
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
@@ -155,30 +183,52 @@ export default function SheetGenerator() {
   const handleConfirmClearAll = () => {
     setDroppedFiles([]);
     setFileContents([]);
+    setImages([]);
     setIsConfirmOpen(false);
+  };
+
+  const handleAddImages = (
+    newImages: { id: string; base64: string; mimeType: string }[],
+  ) => {
+    setImages((prev) => [...prev, ...newImages]);
+  };
+
+  const handleRemoveImage = (id: string) => {
+    setImages((prev) => prev.filter((img) => img.id !== id));
   };
 
   const handleGenerate = () => {
     if (droppedFiles.length === 0 || !sheetId) return;
     setIsLoading(true);
 
-    // Flatten all files from folders
-    const allFileNames: { fileName: string }[] = [];
+    // Flatten all files from folders with content
+    const allFiles: { fileName: string; content: string }[] = [];
     fileContents.forEach((item) => {
       if (item.isDirectory && item.files) {
         item.files.forEach((f) => {
-          allFileNames.push({ fileName: f.fileName });
+          allFiles.push({ fileName: f.fileName, content: f.content });
         });
       } else {
-        allFileNames.push({ fileName: item.fileName });
+        allFiles.push({ fileName: item.fileName, content: item.content || "" });
       }
     });
 
     vscode.postMessage({
-      command: "generateSheet",
+      command: "generateSheetJson",
       sheetId,
-      files: allFileNames,
+      files: allFiles,
+      images: images,
+      selectedTaskId,
+      allTasks: tasks,
     });
+  };
+
+  const handleTaskChange = (taskId: string) => {
+    setSelectedTaskId(taskId);
+    const task = tasks.find((t) => t.id === taskId);
+    if (task) {
+      vscode.postMessage({ command: "logTaskInfo", task });
+    }
   };
 
   const getFileIcon = (fileName: string, isDirectory?: boolean) => {
@@ -204,6 +254,9 @@ export default function SheetGenerator() {
         accessStatus={accessStatus}
         sheetTitle={sheetTitle}
         accessError={accessError}
+        tasks={tasks}
+        selectedTaskId={selectedTaskId}
+        onTaskChange={handleTaskChange}
       />
 
       <FileManagement
@@ -223,6 +276,9 @@ export default function SheetGenerator() {
         isConfirmOpen={isConfirmOpen}
         setIsConfirmOpen={setIsConfirmOpen}
         handleConfirmClearAll={handleConfirmClearAll}
+        images={images}
+        onAddImages={handleAddImages}
+        onRemoveImage={handleRemoveImage}
       />
     </div>
   );

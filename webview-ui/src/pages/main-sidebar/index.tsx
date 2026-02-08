@@ -16,13 +16,25 @@ import {
   Trash2,
   RotateCw,
   ChevronRight,
+  Loader2,
+  AlertCircle,
 } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useState, useEffect, useRef } from "react";
 
 export default function MainSidebar() {
   const [apiKey, setApiKey] = useState("");
   const [tempApiKey, setTempApiKey] = useState("");
   const [isEditingKey, setIsEditingKey] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const tempApiKeyRef = useRef("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -33,6 +45,13 @@ export default function MainSidebar() {
     picture?: string;
   } | null>(null);
   const initialLoadRef = useRef(true);
+
+  const [selectedModel, setSelectedModel] = useState("gemini-3-pro-preview");
+
+  // Sync tempApiKey to ref for event handler access
+  useEffect(() => {
+    tempApiKeyRef.current = tempApiKey;
+  }, [tempApiKey]);
 
   useEffect(() => {
     if (vscode) {
@@ -45,6 +64,9 @@ export default function MainSidebar() {
         if (message.data.geminiApiKey !== undefined) {
           setApiKey(message.data.geminiApiKey);
         }
+        if (message.data.geminiModel) {
+          setSelectedModel(message.data.geminiModel);
+        }
         if (message.data.isLoggedIn !== undefined) {
           setIsLoggedIn(message.data.isLoggedIn);
         }
@@ -56,6 +78,24 @@ export default function MainSidebar() {
         if (initialLoadRef.current) {
           setIsLoading(false);
           initialLoadRef.current = false;
+        }
+      }
+
+      if (message.command === "validateApiKeyResult") {
+        setIsValidating(false);
+        if (message.isValid) {
+          const validKey = tempApiKeyRef.current;
+          if (vscode) {
+            vscode.postMessage({
+              command: "saveConfig",
+              data: { geminiApiKey: validKey },
+            });
+          }
+          setApiKey(validKey);
+          setIsEditingKey(false);
+          setValidationError(null);
+        } else {
+          setValidationError("API Key không hợp lệ hoặc đã hết hạn");
         }
       }
     };
@@ -80,6 +120,7 @@ export default function MainSidebar() {
       setIsReloading(true);
       setIsLoading(true); // Hiển thị Skeleton
       vscode.postMessage({ command: "getConfig" });
+      vscode.postMessage({ command: "refreshToken" });
 
       // Giữ Skeleton hiển thị ít nhất 1s để tạo hiệu ứng mượt mà
       setTimeout(() => {
@@ -104,16 +145,21 @@ export default function MainSidebar() {
   const startEditing = () => {
     setTempApiKey(apiKey);
     setIsEditingKey(true);
+    setValidationError(null);
   };
 
   const saveApiKey = () => {
     if (vscode) {
+      if (!tempApiKey.trim()) {
+        setValidationError("Vui lòng nhập API Key");
+        return;
+      }
+      setIsValidating(true);
+      setValidationError(null);
       vscode.postMessage({
-        command: "saveConfig",
-        data: { geminiApiKey: tempApiKey },
+        command: "validateApiKey",
+        apiKey: tempApiKey,
       });
-      setApiKey(tempApiKey);
-      setIsEditingKey(false);
     }
   };
 
@@ -263,6 +309,15 @@ export default function MainSidebar() {
                 )}
               </div>
 
+              {validationError && isEditingKey && (
+                <div className="flex items-center gap-1.5 px-1 animation-fade-in">
+                  <AlertCircle className="w-3 h-3 text-red-500" />
+                  <span className="text-[10px] text-red-500 font-medium">
+                    {validationError}
+                  </span>
+                </div>
+              )}
+
               {isEditingKey || !apiKey ? (
                 <div className="flex gap-2">
                   <div className="relative flex-1">
@@ -274,7 +329,12 @@ export default function MainSidebar() {
                       onFocus={() => {
                         if (!isEditingKey) setTempApiKey(apiKey);
                       }}
-                      className="h-8 text-xs bg-background pr-8"
+                      className={`h-8 text-xs bg-background pr-8 ${
+                        validationError
+                          ? "border-red-500 focus-visible:ring-red-500"
+                          : ""
+                      }`}
+                      disabled={isValidating}
                     />
                     <button
                       type="button"
@@ -292,8 +352,13 @@ export default function MainSidebar() {
                     size="sm"
                     className="h-8 px-3 cursor-pointer"
                     onClick={saveApiKey}
+                    disabled={isValidating}
                   >
-                    Lưu
+                    {isValidating ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      "Lưu"
+                    )}
                   </Button>
                 </div>
               ) : (
@@ -324,6 +389,43 @@ export default function MainSidebar() {
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* Model Selection */}
+            <div className="space-y-2">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70 px-1">
+                <Sparkles className="w-3 h-3" /> Model
+              </div>
+              <Select
+                value={selectedModel}
+                onValueChange={(value) => {
+                  setSelectedModel(value);
+                  if (vscode) {
+                    vscode.postMessage({
+                      command: "saveConfig",
+                      data: { geminiModel: value },
+                    });
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full h-9 text-xs">
+                  <SelectValue placeholder="Chọn model..." />
+                </SelectTrigger>
+                <SelectContent position="popper">
+                  <SelectItem value="gemini-3-pro-preview">
+                    gemini-3-pro-preview
+                  </SelectItem>
+                  <SelectItem value="gemini-3-flash-preview">
+                    gemini-3-flash-preview
+                  </SelectItem>
+                  <SelectItem value="gemini-2.5-flash">
+                    gemini-2.5-flash
+                  </SelectItem>
+                  <SelectItem value="gemini-2.5-flash-lite">
+                    gemini-2.5-flash-lite
+                  </SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             {/* Profile & Logout */}

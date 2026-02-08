@@ -148,7 +148,17 @@ export class AuthManager {
         throw new Error(`Refresh failed: ${response.statusText}`);
       }
 
-      const newTokenData: any = await response.json();
+      const responseText = await response.text();
+      this.outputChannel.appendLine(`[Auth] Refresh Response: ${responseText}`);
+
+      let newTokenData: any;
+      try {
+        newTokenData = JSON.parse(responseText);
+      } catch (jsonErr) {
+        throw new Error(
+          `Invalid JSON response: ${responseText.substring(0, 100)}...`,
+        );
+      }
       if (newTokenData.access_token) {
         // Cập nhật lại access_token mới vào object cũ (giữ lại refresh_token)
         const updatedTokenObj = {

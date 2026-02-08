@@ -11,7 +11,6 @@ import {
   UploadCloud,
   X,
   Play,
-  RotateCw,
   Eye,
   ChevronDown,
   ChevronRight,
@@ -19,6 +18,7 @@ import {
   FileText,
   FileSpreadsheet,
   Folder,
+  Loader,
 } from "lucide-react";
 import React, { useState } from "react";
 
@@ -53,6 +53,11 @@ interface FileManagementProps {
   isConfirmOpen: boolean;
   setIsConfirmOpen: (open: boolean) => void;
   handleConfirmClearAll: () => void;
+  images: { id: string; base64: string; mimeType: string }[];
+  onAddImages: (
+    imgs: { id: string; base64: string; mimeType: string }[],
+  ) => void;
+  onRemoveImage: (id: string) => void;
 }
 
 export function FileManagement({
@@ -72,8 +77,37 @@ export function FileManagement({
   isConfirmOpen,
   setIsConfirmOpen,
   handleConfirmClearAll,
+  images,
+  onAddImages,
+  onRemoveImage,
 }: FileManagementProps) {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+
+  const handleImagePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData.items;
+
+    for (const item of items) {
+      if (item.type.indexOf("image") !== -1) {
+        const file = item.getAsFile();
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            if (event.target?.result) {
+              const base64 = event.target.result as string;
+              onAddImages([
+                {
+                  id: Date.now().toString() + Math.random().toString(),
+                  base64,
+                  mimeType: file.type,
+                },
+              ]);
+            }
+          };
+          reader.readAsDataURL(file);
+        }
+      }
+    }
+  };
 
   return (
     <>
@@ -177,15 +211,56 @@ export function FileManagement({
         )}
       </div>
 
+      {/* Image Paste/Upload Area */}
+      <div className="flex flex-col gap-2 p-4 border border-dashed border-border/60 rounded-xl bg-card/30 hover:bg-card/50 transition-colors">
+        <div
+          className="flex flex-col items-center justify-center p-4 text-center cursor-text"
+          onPaste={handleImagePaste}
+          tabIndex={0}
+        >
+          <p className="text-xs font-medium text-muted-foreground">
+            Dán (Ctrl+V) hình ảnh minh họa vào đây
+          </p>
+          <p className="text-[10px] text-muted-foreground/60">
+            Hoặc kéo thả file ảnh
+          </p>
+        </div>
+
+        {images.length > 0 && (
+          <div className="grid grid-cols-3 gap-2 mt-2">
+            {images.map((img) => (
+              <div
+                key={img.id}
+                className="relative group aspect-video rounded-lg overflow-hidden border border-border bg-black/20"
+              >
+                <img
+                  src={img.base64}
+                  alt="preview"
+                  className="w-full h-full object-contain"
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => onRemoveImage(img.id)}
+                  className="absolute top-1 right-1 h-6 w-6 bg-black/50 hover:bg-red-500 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  <X className="w-3 h-3" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Action Button */}
       <div className="mt-auto pt-6 pb-4 flex justify-center">
         <Button
-          className="h-12 px-10 bg-primary hover:bg-primary/90 group shadow-xl shadow-primary/20 rounded-2xl transition-all"
+          className="cursor-pointer w-full h-12 px-10 bg-primary hover:bg-primary/90 group shadow-xl shadow-primary/20 rounded-xl transition-all"
           disabled={droppedFiles.length === 0 || isLoading || !sheetId}
           onClick={onGenerate}
         >
           {isLoading ? (
-            <RotateCw className="w-5 h-5 animate-spin" />
+            <Loader className="w-5 h-5 animate-spin" />
           ) : (
             <div className="flex items-center gap-3">
               <span className="font-bold tracking-tight text-sm">
